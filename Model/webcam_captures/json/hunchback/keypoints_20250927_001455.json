@@ -1,0 +1,131 @@
+{
+    "timestamp": "20250927_001455",
+    "image_filename": "webcam_captures/images/capture_20250927_001455.jpg",
+    "detected_persons": 1,
+    "persons": [
+        {
+            "person_id": 1,
+            "keypoints": [
+                {
+                    "part_id": 0,
+                    "part_name": "nose",
+                    "x": 267.7069091796875,
+                    "y": 111.74650573730469,
+                    "confidence": 0.9586054682731628
+                },
+                {
+                    "part_id": 1,
+                    "part_name": "left_eye",
+                    "x": 271.140869140625,
+                    "y": 99.08671569824219,
+                    "confidence": 0.9870026707649231
+                },
+                {
+                    "part_id": 2,
+                    "part_name": "right_eye",
+                    "x": 267.7706298828125,
+                    "y": 104.38398742675781,
+                    "confidence": 0.2445034384727478
+                },
+                {
+                    "part_id": 3,
+                    "part_name": "left_ear",
+                    "x": 302.400390625,
+                    "y": 89.99667358398438,
+                    "confidence": 0.9908549785614014
+                },
+                {
+                    "part_id": 4,
+                    "part_name": "right_ear",
+                    "x": 298.9219055175781,
+                    "y": 99.50881958007812,
+                    "confidence": 0.020139917731285095
+                },
+                {
+                    "part_id": 5,
+                    "part_name": "left_shoulder",
+                    "x": 338.42315673828125,
+                    "y": 138.44761657714844,
+                    "confidence": 0.9973702430725098
+                },
+                {
+                    "part_id": 6,
+                    "part_name": "right_shoulder",
+                    "x": 342.54571533203125,
+                    "y": 132.37452697753906,
+                    "confidence": 0.9130160808563232
+                },
+                {
+                    "part_id": 7,
+                    "part_name": "left_elbow",
+                    "x": 286.9225769042969,
+                    "y": 211.41744995117188,
+                    "confidence": 0.9955944418907166
+                },
+                {
+                    "part_id": 8,
+                    "part_name": "right_elbow",
+                    "x": 299.746337890625,
+                    "y": 189.17312622070312,
+                    "confidence": 0.53766930103302
+                },
+                {
+                    "part_id": 9,
+                    "part_name": "left_wrist",
+                    "x": 237.636962890625,
+                    "y": 187.458984375,
+                    "confidence": 0.9890068769454956
+                },
+                {
+                    "part_id": 10,
+                    "part_name": "right_wrist",
+                    "x": 246.52853393554688,
+                    "y": 186.28659057617188,
+                    "confidence": 0.63870769739151
+                },
+                {
+                    "part_id": 11,
+                    "part_name": "left_hip",
+                    "x": 384.6455078125,
+                    "y": 280.8070068359375,
+                    "confidence": 0.9916719794273376
+                },
+                {
+                    "part_id": 12,
+                    "part_name": "right_hip",
+                    "x": 385.71856689453125,
+                    "y": 269.3454895019531,
+                    "confidence": 0.9613136053085327
+                },
+                {
+                    "part_id": 13,
+                    "part_name": "left_knee",
+                    "x": 242.2732391357422,
+                    "y": 310.97894287109375,
+                    "confidence": 0.9936610460281372
+                },
+                {
+                    "part_id": 14,
+                    "part_name": "right_knee",
+                    "x": 252.64691162109375,
+                    "y": 290.5644836425781,
+                    "confidence": 0.9614251255989075
+                },
+                {
+                    "part_id": 15,
+                    "part_name": "left_ankle",
+                    "x": 265.1961975097656,
+                    "y": 442.6936340332031,
+                    "confidence": 0.9578827023506165
+                },
+                {
+                    "part_id": 16,
+                    "part_name": "right_ankle",
+                    "x": 256.3384704589844,
+                    "y": 404.3184509277344,
+                    "confidence": 0.893487274646759
+                }
+            ]
+        }
+    ]
+}
