@@ -55,6 +55,10 @@ android {
 
     packaging {
         jniLibs {
+
+            // TensorFlow Lite for on-device HRNet/YOLO inference
+            implementation("org.tensorflow:tensorflow-lite:2.12.0")
+            // Optional: GPU or NNAPI delegates can be added later if needed
             useLegacyPackaging = false
         }
         // Exclude potential duplicated licenses/meta
