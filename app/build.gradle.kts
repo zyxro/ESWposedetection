@@ -37,6 +37,46 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // Only build and package arm64-v8a (typical target for modern devices / QIDK)
+    defaultConfig {
+        // ... existing entries ...
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+        
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17", "-fexceptions", "-frtti")
+                arguments += listOf("-DANDROID_STL=c++_shared")
+            }
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+        // Exclude potential duplicated licenses/meta
+        resources {
+            excludes += "/META-INF/{LICENSE*,NOTICE*,AL2.0,LGPL2.1}"
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    // TODO: When integrating QIDK/QNN on device, you may need to
+    // package native libs and model files. Example:
+    // packaging {
+    //     jniLibs {
+    //         useLegacyPackaging = true
+    //     }
+    // }
 }
 
 dependencies {
@@ -55,7 +95,9 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.5.0")
     implementation("androidx.camera:camera-view:1.5.0")
     implementation("androidx.camera:camera-extensions:1.5.0")
+    // ML Kit pose used for local dev/testing; replace with QIDK HRNet on device
     implementation("com.google.mlkit:pose-detection-accurate:17.0.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -5,6 +5,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.camera.view.PreviewView.ScaleType
 
 @Composable
 fun CameraPreview(
@@ -14,6 +15,7 @@ fun CameraPreview(
     AndroidView(
         factory = {
             PreviewView(it).apply {
+                this.scaleType = ScaleType.FIT_CENTER
                 this.controller = controller
             }
         },

@@ -5,19 +5,25 @@ import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.graphics.PointF
 import android.os.Bundle
+import android.util.Size
+import androidx.annotation.Keep
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.view.LifecycleCameraController
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -27,13 +33,25 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.eswproject.ui.theme.ESWProjectTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.min
 import java.text.SimpleDateFormat
 import java.util.*
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.pose.PoseDetection
+import com.google.mlkit.vision.pose.accurate.AccuratePoseDetectorOptions
+import com.google.mlkit.vision.pose.PoseLandmark
 
 sealed class Screen(val route: String, val title: String)
 object HomeScreenRoute : Screen("home", "Home")
@@ -70,7 +88,26 @@ class MainActivity : ComponentActivity() {
 
                 val cameraController = remember {
                     LifecycleCameraController(context).apply {
+                        setImageAnalysisAnalyzer(Dispatchers.Default.asExecutor(), FrameAnalyzer())
                         bindToLifecycle(this@MainActivity)
+                    }
+                }
+
+                val analyzerState = remember { FrameAnalyzer.state }
+                var showSkeleton by remember { mutableStateOf(true) }
+                
+                // Analytics state
+                var performanceMetrics by remember { mutableStateOf<PerformanceMetrics?>(null) }
+                var postureAnalysis by remember { mutableStateOf<PostureAnalysis?>(null) }
+                
+                // Update analytics periodically
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        delay(500) // Update analytics every 500ms
+                        if (QidkBackends.isAvailable()) {
+                            performanceMetrics = QidkBackends.getPerformanceMetrics()
+                            postureAnalysis = QidkBackends.getPostureAnalysis()
+                        }
                     }
                 }
 
@@ -124,15 +161,25 @@ class MainActivity : ComponentActivity() {
                         if (hasPermissions) {
                             when (currentScreen) {
                                 HomeScreenRoute -> HomeScreen(
-                                    pose = demoData.last().first,
-                                    score = demoData.last().second,
+                                    pose = postureAnalysis?.postureName ?: demoData.last().first,
+                                    score = postureAnalysis?.score ?: demoData.last().second,
+                                    postureAnalysis = postureAnalysis,
+                                    performanceMetrics = performanceMetrics
                                 )
                                 CameraScreenRoute -> CameraScreen(
                                     controller = cameraController,
-                                    pose = demoData.last().first,
-                                    score = demoData.last().second,
+                                    pose = postureAnalysis?.postureName ?: demoData.last().first,
+                                    score = postureAnalysis?.score ?: demoData.last().second,
+                                    overlay = if (showSkeleton) analyzerState.collectAsState().value else null,
+                                    showSkeleton = showSkeleton,
+                                    onToggleSkeleton = { showSkeleton = !showSkeleton },
+                                    postureAnalysis = postureAnalysis,
+                                    performanceMetrics = performanceMetrics
                                 )
-                                HistoryScreenRoute -> HistoryScreen(demoData.toList())
+                                HistoryScreenRoute -> HistoryScreen(
+                                    data = demoData.toList(),
+                                    postureAnalysis = postureAnalysis
+                                )
                             }
                         } else {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -156,7 +203,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun HomeScreen(
     pose: String,
-    score: Int
+    score: Int,
+    postureAnalysis: PostureAnalysis? = null,
+    performanceMetrics: PerformanceMetrics? = null
 ) {
     Column(
         modifier = Modifier
@@ -172,13 +221,13 @@ fun HomeScreen(
             style = MaterialTheme.typography.headlineMedium,
         )
         Text(
-            "Here's your posture summary",
+            if (QidkBackends.isAvailable()) "QIDK Backend Active" else "ML Kit Backend Active",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 32.dp)
         )
 
-        // Main Score Display
+        // Main Score Display with enhanced info
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
@@ -236,6 +285,99 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+        
+        // Performance Analytics (only show if QIDK backend is active)
+        if (QidkBackends.isAvailable() && performanceMetrics != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Speed, contentDescription = "Performance", 
+                             modifier = Modifier.padding(end = 8.dp),
+                             tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text("Performance Metrics", 
+                             style = MaterialTheme.typography.titleMedium,
+                             color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Row(modifier = Modifier.fillMaxWidth(), 
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column {
+                            Text("FPS", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f".format(performanceMetrics.fps), 
+                                 style = MaterialTheme.typography.bodyLarge,
+                                 fontWeight = FontWeight.Bold)
+                        }
+                        Column {
+                            Text("Total Time", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f ms".format(performanceMetrics.totalTimeMs), 
+                                 style = MaterialTheme.typography.bodyLarge,
+                                 fontWeight = FontWeight.Bold)
+                        }
+                        Column {
+                            Text("Detection", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f ms".format(performanceMetrics.detectionTimeMs), 
+                                 style = MaterialTheme.typography.bodyLarge,
+                                 fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+        
+        // Posture Analysis Details
+        if (postureAnalysis != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Analytics, contentDescription = "Analysis", 
+                             modifier = Modifier.padding(end = 8.dp),
+                             tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                        Text("Posture Analysis", 
+                             style = MaterialTheme.typography.titleMedium,
+                             color = MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Row(modifier = Modifier.fillMaxWidth(), 
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Column {
+                            Text("Duration", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f s".format(postureAnalysis.durationSeconds), 
+                                 style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Column {
+                            Text("Shoulder Angle", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f°".format(postureAnalysis.shoulderAngle), 
+                                 style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Column {
+                            Text("Spine Alignment", style = MaterialTheme.typography.labelMedium)
+                            Text("%.1f°".format(postureAnalysis.spineAlignment), 
+                                 style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
@@ -244,32 +386,373 @@ fun HomeScreen(
 fun CameraScreen(
     controller: LifecycleCameraController,
     pose: String,
-    score: Int
+    score: Int,
+    overlay: PoseOverlay?,
+    showSkeleton: Boolean,
+    onToggleSkeleton: () -> Unit,
+    postureAnalysis: PostureAnalysis? = null,
+    performanceMetrics: PerformanceMetrics? = null
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         CameraPreview(
             controller = controller,
             modifier = Modifier.fillMaxSize()
         )
+        PoseOverlayComposable(overlay)
+        
+        // Performance overlay (top-right)
+        if (QidkBackends.isAvailable() && performanceMetrics != null) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color.Black.copy(alpha = 0.7f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(8.dp)) {
+                    Text("FPS: %.1f".format(performanceMetrics.fps), 
+                         color = Color.White, style = MaterialTheme.typography.bodySmall)
+                    Text("%.1fms".format(performanceMetrics.totalTimeMs), 
+                         color = Color.White, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .align(Alignment.TopEnd),
+            horizontalArrangement = Arrangement.End
+        ) {
+            AssistChip(
+                onClick = onToggleSkeleton,
+                label = { Text(if (showSkeleton) "Hide Skeleton" else "Show Skeleton") }
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
         ) {
-            PostureInfoCard(pose = pose, score = score)
+            PostureInfoCard(
+                pose = pose, 
+                score = score, 
+                postureAnalysis = postureAnalysis
+            )
         }
     }
 }
 
+// Pose overlay data
+data class Keypoint(val x: Float, val y: Float, val score: Float)
+data class PoseOverlay(
+    val keypoints: Map<Int, Keypoint>,
+    val width: Int,
+    val height: Int,
+    val isFrontCamera: Boolean
+)
+
 @Composable
-fun HistoryScreen(data: List<Triple<String, Int, Long>>) {
+fun PoseOverlayComposable(pose: PoseOverlay?) {
+    if (pose == null) return
+    val density = LocalDensity.current
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        if (pose.width == 0 || pose.height == 0) return@Canvas
+        val scaleX = size.width / pose.width
+        val scaleY = size.height / pose.height
+        val scale = min(scaleX, scaleY)
+        val contentW = pose.width * scale
+        val contentH = pose.height * scale
+        val dx = (size.width - contentW) / 2f
+        val dy = (size.height - contentH) / 2f
+
+        fun mapX(x: Float): Float {
+            val v = x * scale
+            return if (pose.isFrontCamera) (size.width - dx) - v else dx + v
+        }
+        fun mapY(y: Float): Float = dy + y * scale
+
+        val connections = listOf(
+            // torso
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.RIGHT_SHOULDER,
+            PoseLandmark.LEFT_HIP to PoseLandmark.RIGHT_HIP,
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_HIP,
+            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_HIP,
+            // arms
+            PoseLandmark.LEFT_SHOULDER to PoseLandmark.LEFT_ELBOW,
+            PoseLandmark.LEFT_ELBOW to PoseLandmark.LEFT_WRIST,
+            PoseLandmark.RIGHT_SHOULDER to PoseLandmark.RIGHT_ELBOW,
+            PoseLandmark.RIGHT_ELBOW to PoseLandmark.RIGHT_WRIST,
+            // legs
+            PoseLandmark.LEFT_HIP to PoseLandmark.LEFT_KNEE,
+            PoseLandmark.LEFT_KNEE to PoseLandmark.LEFT_ANKLE,
+            PoseLandmark.RIGHT_HIP to PoseLandmark.RIGHT_KNEE,
+            PoseLandmark.RIGHT_KNEE to PoseLandmark.RIGHT_ANKLE,
+            // head
+            PoseLandmark.LEFT_EYE to PoseLandmark.RIGHT_EYE,
+            PoseLandmark.NOSE to PoseLandmark.LEFT_EYE,
+            PoseLandmark.NOSE to PoseLandmark.RIGHT_EYE,
+            PoseLandmark.LEFT_EAR to PoseLandmark.LEFT_EYE,
+            PoseLandmark.RIGHT_EAR to PoseLandmark.RIGHT_EYE
+        )
+
+        val lineColor = Color(0xFF00E5FF)
+        val pointColor = Color(0xFFFF4081)
+
+        connections.forEach { (a, b) ->
+            val ka = pose.keypoints[a]
+            val kb = pose.keypoints[b]
+            if (ka != null && kb != null && ka.score > 0.4f && kb.score > 0.4f) {
+                drawLine(
+                    color = lineColor,
+                    start = Offset(mapX(ka.x), mapY(ka.y)),
+                    end = Offset(mapX(kb.x), mapY(kb.y)),
+                    strokeWidth = 6f
+                )
+            }
+        }
+        pose.keypoints.values.forEach { kp ->
+            if (kp.score > 0.4f) {
+                drawCircle(pointColor, radius = 8f, center = Offset(mapX(kp.x), mapY(kp.y)))
+            }
+        }
+    }
+}
+
+// Analyzer: YOLO-NAS (person) + HRNet (pose)
+// For development we use ML Kit pose; define a QIDK stub for later device integration.
+class FrameAnalyzer : ImageAnalysis.Analyzer {
+    private val detector by lazy {
+        val options = AccuratePoseDetectorOptions.Builder()
+            .setDetectorMode(AccuratePoseDetectorOptions.STREAM_MODE)
+            .build()
+        PoseDetection.getClient(options)
+    }
+
+    companion object {
+        private val _state = MutableStateFlow<PoseOverlay?>(null)
+        val state = _state.asStateFlow()
+    }
+
+    override fun analyze(image: ImageProxy) {
+        val mediaImage = image.image ?: run { image.close(); return }
+        val rotation = image.imageInfo.rotationDegrees
+        val width = image.width
+        val height = image.height
+
+        // Attempt QNN path first if available
+        if (QidkBackends.isAvailable()) {
+            // Convert YUV420 planes into a single NV21 byte array (simple copy)
+            try {
+                val yPlane = mediaImage.planes[0].buffer
+                val uPlane = mediaImage.planes[1].buffer
+                val vPlane = mediaImage.planes[2].buffer
+                val ySize = yPlane.remaining()
+                val uSize = uPlane.remaining()
+                val vSize = vPlane.remaining()
+                val nv21 = ByteArray(ySize + uSize + vSize)
+                yPlane.get(nv21, 0, ySize)
+                // NOTE: This layout might differ on some devices; proper conversion may be needed.
+                vPlane.get(nv21, ySize, vSize)
+                uPlane.get(nv21, ySize + vSize, uSize)
+                val pose = QidkBackends.detectAndPose(nv21, width, height, isFront = false)
+                if (pose != null) {
+                    _state.value = pose
+                    image.close()
+                    return
+                }
+            } catch (_: Throwable) {
+                // Fall through to ML Kit
+            }
+        }
+
+        val img = InputImage.fromMediaImage(mediaImage, rotation)
+        detector.process(img)
+            .addOnSuccessListener { pose ->
+                val map = mutableMapOf<Int, Keypoint>()
+                pose.allPoseLandmarks.forEach { l ->
+                    map[l.landmarkType] = Keypoint(l.position.x, l.position.y, l.inFrameLikelihood)
+                }
+                _state.value = PoseOverlay(map, img.width, img.height, isFrontCamera = false)
+            }
+            .addOnFailureListener {
+                // ignore
+            }
+            .addOnCompleteListener {
+                image.close()
+            }
+    }
+}
+
+// Enhanced QidkBackends with analytics support
+@Keep
+object QidkBackends {
+    private var native: QidkNative? = null
+    private var checked = false
+    private var available = false
+
+    fun ensureInit() {
+        if (checked) return
+        checked = true
+        try {
+            val n = QidkNative()
+            if (n.init()) {
+                native = n
+                available = (n.isAvailable() == 1)
+            }
+        } catch (_: Throwable) {
+            available = false
+        }
+    }
+
+    fun isAvailable(): Boolean {
+        ensureInit()
+        return available
+    }
+
+    // Accept YUV420 (NV21) bytes and produce PoseOverlay or null
+    fun detectAndPose(yuv: ByteArray, width: Int, height: Int, isFront: Boolean): PoseOverlay? {
+        val n = native ?: return null
+        val maxKp = 40 // Enough for HRNet variants
+        val ids = IntArray(maxKp)
+        val xs = FloatArray(maxKp)
+        val ys = FloatArray(maxKp)
+        val scores = FloatArray(maxKp)
+        val count = try { n.runPipeline(yuv, width, height, 0.25f, ids, xs, ys, scores, maxKp) } catch (_: Throwable) { 0 }
+        if (count <= 0) return null
+        
+        // Map HRNet COCO-17 keypoint IDs to ML Kit PoseLandmark constants
+        val hrnetToMLKit = mapOf(
+            0 to PoseLandmark.NOSE,           // NOSE = 0
+            1 to PoseLandmark.LEFT_EYE,       // LEFT_EYE = 1  
+            2 to PoseLandmark.RIGHT_EYE,      // RIGHT_EYE = 2
+            3 to PoseLandmark.LEFT_EAR,       // LEFT_EAR = 3
+            4 to PoseLandmark.RIGHT_EAR,      // RIGHT_EAR = 4
+            5 to PoseLandmark.LEFT_SHOULDER,  // LEFT_SHOULDER = 5
+            6 to PoseLandmark.RIGHT_SHOULDER, // RIGHT_SHOULDER = 6
+            7 to PoseLandmark.LEFT_ELBOW,     // LEFT_ELBOW = 7
+            8 to PoseLandmark.RIGHT_ELBOW,    // RIGHT_ELBOW = 8
+            9 to PoseLandmark.LEFT_WRIST,     // LEFT_WRIST = 9
+            10 to PoseLandmark.RIGHT_WRIST,   // RIGHT_WRIST = 10
+            11 to PoseLandmark.LEFT_HIP,      // LEFT_HIP = 11
+            12 to PoseLandmark.RIGHT_HIP,     // RIGHT_HIP = 12
+            13 to PoseLandmark.LEFT_KNEE,     // LEFT_KNEE = 13
+            14 to PoseLandmark.RIGHT_KNEE,    // RIGHT_KNEE = 14
+            15 to PoseLandmark.LEFT_ANKLE,    // LEFT_ANKLE = 15
+            16 to PoseLandmark.RIGHT_ANKLE    // RIGHT_ANKLE = 16
+        )
+        
+        val map = mutableMapOf<Int, Keypoint>()
+        for (i in 0 until count) {
+            val mlkitId = hrnetToMLKit[ids[i]]
+            if (mlkitId != null) {
+                map[mlkitId] = Keypoint(xs[i], ys[i], scores[i])
+            }
+        }
+        return PoseOverlay(map, width, height, isFrontCamera = isFront)
+    }
+    
+    // Get performance analytics
+    fun getPerformanceMetrics(): PerformanceMetrics? {
+        val n = native ?: return null
+        return try {
+            val metrics = n.getPerformanceMetrics()
+            if (metrics.size >= 4) {
+                PerformanceMetrics(metrics[0], metrics[1], metrics[2], metrics[3])
+            } else null
+        } catch (_: Throwable) { null }
+    }
+    
+    // Get posture analysis
+    fun getPostureAnalysis(): PostureAnalysis? {
+        val n = native ?: return null
+        return try {
+            val analysis = n.getPostureAnalysis()
+            val postureName = n.getPostureName()
+            if (analysis.size >= 5) {
+                PostureAnalysis(
+                    analysis[0], analysis[1], analysis[2], 
+                    analysis[3].toInt(), analysis[4], postureName
+                )
+            } else null
+        } catch (_: Throwable) { null }
+    }
+}
+
+// JNI native wrapper with enhanced analytics
+class QidkNative {
+    companion object {
+        init {
+            try {
+                System.loadLibrary("qidk_backend")
+            } catch (e: Throwable) {
+                // Library not present yet
+            }
+        }
+    }
+    external fun init(): Boolean
+    external fun isAvailable(): Int
+    external fun runPipeline(
+        yuv420: ByteArray,
+        width: Int,
+        height: Int,
+        scoreThreshold: Float,
+        outIds: IntArray,
+        outX: FloatArray,
+        outY: FloatArray,
+        outScores: FloatArray,
+        maxKp: Int
+    ): Int
+    
+    // New analytics functions
+    external fun getPerformanceMetrics(): FloatArray // [detectionMs, poseMs, totalMs, fps]
+    external fun getPostureAnalysis(): FloatArray   // [shoulderAngle, spineAlignment, headTilt, score, duration]  
+    external fun getPostureName(): String
+}
+
+// Performance and posture data classes
+data class PerformanceMetrics(
+    val detectionTimeMs: Float,
+    val poseTimeMs: Float,
+    val totalTimeMs: Float,
+    val fps: Float
+)
+
+data class PostureAnalysis(
+    val shoulderAngle: Float,
+    val spineAlignment: Float, 
+    val headTilt: Float,
+    val score: Int,
+    val durationSeconds: Float,
+    val postureName: String
+)
+
+@Composable
+fun HistoryScreen(
+    data: List<Triple<String, Int, Long>>,
+    postureAnalysis: PostureAnalysis? = null
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("Posture History", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 24.dp))
+        
+        // Current posture info if available
+        postureAnalysis?.let { analysis ->
+            PostureInfoCard(
+                pose = analysis.postureName,
+                score = analysis.score,
+                postureAnalysis = analysis
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+        
         PostureGraph(data.map { it.second to it.third }, modifier = Modifier.fillMaxWidth().height(300.dp))
     }
 }
@@ -415,7 +898,11 @@ fun PostureGraph(data: List<Pair<Int, Long>>, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun PostureInfoCard(pose: String, score: Int) {
+fun PostureInfoCard(
+    pose: String, 
+    score: Int, 
+    postureAnalysis: PostureAnalysis? = null
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth(),
@@ -444,24 +931,36 @@ fun PostureInfoCard(pose: String, score: Int) {
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.Bold
                 )
+                
+                // Show duration if available
+                if (postureAnalysis != null && postureAnalysis.durationSeconds > 0) {
+                    Text(
+                        text = "Held for %.1f seconds".format(postureAnalysis.durationSeconds),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
             }
-            Box(contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(
-                    progress = { score / 100f },
-                    modifier = Modifier.size(64.dp),
-                    strokeWidth = 6.dp,
-                    trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
-                    color = when {
-                        score > 80 -> Color(0xFF4CAF50) // Green
-                        score > 60 -> Color(0xFFFFC107) // Amber
-                        else -> Color(0xFFF44336)       // Red
-                    }
-                )
-                Text(
-                    text = "$score",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(
+                        progress = { score / 100f },
+                        modifier = Modifier.size(64.dp),
+                        strokeWidth = 6.dp,
+                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                        color = when {
+                            score > 80 -> Color(0xFF4CAF50) // Green
+                            score > 60 -> Color(0xFFFFC107) // Amber
+                            else -> Color(0xFFF44336)       // Red
+                        }
+                    )
+                    Text(
+                        text = "$score",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
