@@ -71,7 +71,10 @@ struct PostureMetrics {
 };
 
 // Global state
-static std::mutex gMutex;
+static std::mutex& getMutex() {
+    static std::mutex gMutex;
+    return gMutex;
+}
 static bool gInitialized = false;
 static PerformanceMetrics gMetrics;
 static PostureMetrics gPosture;
@@ -276,7 +279,7 @@ void analyzePosture(const std::vector<Keypoint>& keypoints) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_example_eswproject_QidkNative_init(JNIEnv* env, jobject thiz) {
-    std::scoped_lock lk(gMutex);
+    std::scoped_lock lk(getMutex());
     if (gInitialized) return JNI_TRUE;
     
     // Initialize performance tracking
@@ -311,7 +314,7 @@ Java_com_example_eswproject_QidkNative_runPipeline(
         jfloatArray outScores,
         jint maxKp
 ) {
-    std::scoped_lock lk(gMutex);
+    std::scoped_lock lk(getMutex());
     
     auto frameStart = std::chrono::high_resolution_clock::now();
     
@@ -399,7 +402,7 @@ Java_com_example_eswproject_QidkNative_runPipeline(
 // New JNI functions for performance and posture analytics
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_example_eswproject_QidkNative_getPerformanceMetrics(JNIEnv* env, jobject thiz) {
-    std::scoped_lock lk(gMutex);
+    std::scoped_lock lk(getMutex());
     
     jfloatArray result = env->NewFloatArray(4);
     if (result) {
@@ -416,7 +419,7 @@ Java_com_example_eswproject_QidkNative_getPerformanceMetrics(JNIEnv* env, jobjec
 
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_example_eswproject_QidkNative_getPostureAnalysis(JNIEnv* env, jobject thiz) {
-    std::scoped_lock lk(gMutex);
+    std::scoped_lock lk(getMutex());
     
     jfloatArray result = env->NewFloatArray(5);
     if (result) {
@@ -434,6 +437,6 @@ Java_com_example_eswproject_QidkNative_getPostureAnalysis(JNIEnv* env, jobject t
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_example_eswproject_QidkNative_getPostureName(JNIEnv* env, jobject thiz) {
-    std::scoped_lock lk(gMutex);
+    std::scoped_lock lk(getMutex());
     return env->NewStringUTF(gPosture.postureName.c_str());
 }

@@ -21,4 +21,6 @@ add_library(qidk_backend SHARED
 
 target_link_libraries(qidk_backend
     log
+    c++_shared
+    atomic
 )
