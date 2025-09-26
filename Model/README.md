@@ -59,3 +59,39 @@ The `train_model.py` script trains a Random Forest Classifier to classify postur
    - The trained model is saved as `posture_model_final.pkl` for future use in live posture detection.
 
 These outputs help in understanding the model's performance and readiness for deployment.
+
+---
+
+## Setup: Python dependencies (Windows PowerShell)
+
+Use Python 3.10–3.11 and a virtual environment:
+
+1) Create and activate venv
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+2) Upgrade pip and install requirements
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+If you have a CUDA GPU and want acceleration, install matching torch/torchvision builds from https://pytorch.org/get-started/locally/ before installing the rest.
+
+## Run live YOLO pose capture
+
+The `run_live_model.py` (or the example webcam script you shared) captures a frame, runs YOLO pose, and saves keypoints JSON under `webcam_captures/`.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python run_live_model.py
+```
+
+Tips:
+- Adjust the camera index in `cv2.VideoCapture(2)` to 0/1/2 depending on your system.
+- First run may download weights; ensure internet access.
+- If `python` opens Microsoft Store, disable App Execution Aliases for Python and reopen PowerShell.

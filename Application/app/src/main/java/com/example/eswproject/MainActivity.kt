@@ -87,9 +87,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val appContext = context.applicationContext
                 val cameraController = remember {
                     LifecycleCameraController(context).apply {
-                        setImageAnalysisAnalyzer(Dispatchers.Default.asExecutor(), FrameAnalyzer())
+                        setImageAnalysisAnalyzer(Dispatchers.Default.asExecutor(), FrameAnalyzer(appContext))
                         bindToLifecycle(this@MainActivity)
                     }
                 }
@@ -493,13 +494,15 @@ fun PoseOverlayComposable(pose: PoseOverlay?) {
 
 // Analyzer: YOLO-NAS (person) + HRNet (pose)
 // For development we use ML Kit pose; define a QIDK stub for later device integration.
-class FrameAnalyzer : ImageAnalysis.Analyzer {
+class FrameAnalyzer(private val appContext: android.content.Context) : ImageAnalysis.Analyzer {
     private val detector by lazy {
         val options = AccuratePoseDetectorOptions.Builder()
             .setDetectorMode(AccuratePoseDetectorOptions.STREAM_MODE)
             .build()
         PoseDetection.getClient(options)
     }
+
+    private var poseEngine: PoseEngine? = null
 
     companion object {
         private val _state = MutableStateFlow<PoseOverlay?>(null)
@@ -523,8 +526,55 @@ class FrameAnalyzer : ImageAnalysis.Analyzer {
                     return
                 }
             } catch (_: Throwable) {
-                // Fall through to ML Kit
+                // Fall through
             }
+        }
+
+        // Try TensorFlow Lite HRNet fallback if present
+        try {
+            if (poseEngine == null) {
+                poseEngine = PoseEngine(appContext).also { it.load() }
+            }
+            val engine = poseEngine
+            if (engine != null && engine.isReady()) {
+                val nv21 = yuv420ToNV21(mediaImage)
+                val roi = engine.detectPerson(width, height)
+                val kp = engine.runHrnet(nv21, width, height, roi)
+                if (kp.isNotEmpty()) {
+                    val map = mutableMapOf<Int, Keypoint>()
+                    // Map HRNet COCO order directly to overlay ML Kit ids subset
+                    val ids = arrayOf(
+                        PoseLandmark.NOSE,
+                        PoseLandmark.LEFT_EYE,
+                        PoseLandmark.RIGHT_EYE,
+                        PoseLandmark.LEFT_EAR,
+                        PoseLandmark.RIGHT_EAR,
+                        PoseLandmark.LEFT_SHOULDER,
+                        PoseLandmark.RIGHT_SHOULDER,
+                        PoseLandmark.LEFT_ELBOW,
+                        PoseLandmark.RIGHT_ELBOW,
+                        PoseLandmark.LEFT_WRIST,
+                        PoseLandmark.RIGHT_WRIST,
+                        PoseLandmark.LEFT_HIP,
+                        PoseLandmark.RIGHT_HIP,
+                        PoseLandmark.LEFT_KNEE,
+                        PoseLandmark.RIGHT_KNEE,
+                        PoseLandmark.LEFT_ANKLE,
+                        PoseLandmark.RIGHT_ANKLE
+                    )
+                    for (i in ids.indices) {
+                        val (x, y, s) = kp[i]
+                        map[ids[i]] = Keypoint(x, y, s)
+                    }
+                    val rotated = rotateKeypoints(map, width, height, rotation)
+                    val out = PoseOverlay(rotated.first, rotated.second.first, rotated.second.second, isFrontCamera = false)
+                    _state.value = out
+                    image.close()
+                    return
+                }
+            }
+        } catch (_: Throwable) {
+            // ignore and fall back
         }
 
         val img = InputImage.fromMediaImage(mediaImage, rotation)
@@ -542,538 +592,5 @@ class FrameAnalyzer : ImageAnalysis.Analyzer {
             .addOnCompleteListener {
                 image.close()
             }
-    }
-}
-
-// Enhanced QidkBackends with analytics support
-@Keep
-object QidkBackends {
-    private var native: QidkNative? = null
-    private var checked = false
-    private var available = false
-
-    // State for temporal smoothing
-    private var lastMap: MutableMap<Int, Keypoint>? = null
-    private var lastDims: Pair<Int, Int>? = null
-
-    fun ensureInit() {
-        if (checked) return
-        checked = true
-        try {
-            val n = QidkNative()
-            if (n.init()) {
-                native = n
-                available = (n.isAvailable() == 1)
-            }
-        } catch (_: Throwable) {
-            available = false
-        }
-    }
-
-    fun isAvailable(): Boolean {
-        ensureInit()
-        return available
-    }
-
-    // Accept YUV420 (NV21) bytes and produce PoseOverlay or null
-    fun detectAndPose(yuv: ByteArray, width: Int, height: Int, rotationDegrees: Int, isFront: Boolean): PoseOverlay? {
-        val n = native ?: return null
-        val maxKp = 40 // Enough for HRNet variants
-        val ids = IntArray(maxKp)
-        val xs = FloatArray(maxKp)
-        val ys = FloatArray(maxKp)
-        val scores = FloatArray(maxKp)
-        val count = try { n.runPipeline(yuv, width, height, 0.25f, ids, xs, ys, scores, maxKp) } catch (_: Throwable) { 0 }
-        if (count <= 0) {
-            // reset smoothing when no detections
-            lastMap = null
-            lastDims = null
-            return null
-        }
-        
-        // Map HRNet COCO-17 keypoint IDs to ML Kit PoseLandmark constants
-        val hrnetToMLKit = mapOf(
-            0 to PoseLandmark.NOSE,
-            1 to PoseLandmark.LEFT_EYE,
-            2 to PoseLandmark.RIGHT_EYE,
-            3 to PoseLandmark.LEFT_EAR,
-            4 to PoseLandmark.RIGHT_EAR,
-            5 to PoseLandmark.LEFT_SHOULDER,
-            6 to PoseLandmark.RIGHT_SHOULDER,
-            7 to PoseLandmark.LEFT_ELBOW,
-            8 to PoseLandmark.RIGHT_ELBOW,
-            9 to PoseLandmark.LEFT_WRIST,
-            10 to PoseLandmark.RIGHT_WRIST,
-            11 to PoseLandmark.LEFT_HIP,
-            12 to PoseLandmark.RIGHT_HIP,
-            13 to PoseLandmark.LEFT_KNEE,
-            14 to PoseLandmark.RIGHT_KNEE,
-            15 to PoseLandmark.LEFT_ANKLE,
-            16 to PoseLandmark.RIGHT_ANKLE
-        )
-        
-        // Populate keypoints map (raw)
-        val rawMap = mutableMapOf<Int, Keypoint>()
-        for (i in 0 until count) {
-            val mlkitId = hrnetToMLKit[ids[i]]
-            if (mlkitId != null) {
-                rawMap[mlkitId] = Keypoint(xs[i], ys[i], scores[i])
-            }
-        }
-
-        // Rotate keypoints into upright preview space
-        val rotated = rotateKeypoints(rawMap, width, height, rotationDegrees)
-        val rotatedMap = rotated.first
-        val outW = rotated.second.first
-        val outH = rotated.second.second
-
-        // Confidence gating: require at least 5 reliable joints
-        val reliable = rotatedMap.values.count { it.score >= 0.5f }
-        if (reliable < 5) {
-            lastMap = null
-            lastDims = null
-            return null
-        }
-
-        // Temporal smoothing (EMA)
-        val alpha = 0.7f // previous weight
-        val smoothed = mutableMapOf<Int, Keypoint>()
-        if (lastMap != null && lastDims == Pair(outW, outH)) {
-            val prev = lastMap!!
-            for ((id, curr) in rotatedMap) {
-                val p = prev[id]
-                if (p != null) {
-                    val sx = alpha * p.x + (1 - alpha) * curr.x
-                    val sy = alpha * p.y + (1 - alpha) * curr.y
-                    val ss = alpha * p.score + (1 - alpha) * curr.score
-                    smoothed[id] = Keypoint(sx, sy, ss)
-                } else {
-                    smoothed[id] = curr
-                }
-            }
-        } else {
-            smoothed.putAll(rotatedMap)
-        }
-
-        // Update state
-        lastMap = smoothed.toMutableMap()
-        lastDims = Pair(outW, outH)
-
-        return PoseOverlay(smoothed, outW, outH, isFrontCamera = isFront)
-    }
-
-    // Get performance analytics
-    fun getPerformanceMetrics(): PerformanceMetrics? {
-        val n = native ?: return null
-        return try {
-            val metrics = n.getPerformanceMetrics()
-            if (metrics.size >= 4) {
-                PerformanceMetrics(metrics[0], metrics[1], metrics[2], metrics[3])
-            } else null
-        } catch (_: Throwable) { null }
-    }
-    
-    // Get posture analysis
-    fun getPostureAnalysis(): PostureAnalysis? {
-        val n = native ?: return null
-        return try {
-            val analysis = n.getPostureAnalysis()
-            val postureName = n.getPostureName()
-            if (analysis.size >= 5) {
-                PostureAnalysis(
-                    analysis[0], analysis[1], analysis[2], 
-                    analysis[3].toInt(), analysis[4], postureName
-                )
-            } else null
-        } catch (_: Throwable) { null }
-    }
-}
-
-// JNI native wrapper with enhanced analytics
-class QidkNative {
-    companion object {
-        init {
-            try {
-                System.loadLibrary("qidk_backend")
-            } catch (e: Throwable) {
-                // Library not present yet
-            }
-        }
-    }
-    external fun init(): Boolean
-    external fun isAvailable(): Int
-    external fun runPipeline(
-        yuv420: ByteArray,
-        width: Int,
-        height: Int,
-        scoreThreshold: Float,
-        outIds: IntArray,
-        outX: FloatArray,
-        outY: FloatArray,
-        outScores: FloatArray,
-        maxKp: Int
-    ): Int
-    
-    // New analytics functions
-    external fun getPerformanceMetrics(): FloatArray // [detectionMs, poseMs, totalMs, fps]
-    external fun getPostureAnalysis(): FloatArray   // [shoulderAngle, spineAlignment, headTilt, score, duration]  
-    external fun getPostureName(): String
-}
-
-// Performance and posture data classes
-data class PerformanceMetrics(
-    val detectionTimeMs: Float,
-    val poseTimeMs: Float,
-    val totalTimeMs: Float,
-    val fps: Float
-)
-
-data class PostureAnalysis(
-    val shoulderAngle: Float,
-    val spineAlignment: Float, 
-    val headTilt: Float,
-    val score: Int,
-    val durationSeconds: Float,
-    val postureName: String
-)
-
-@Composable
-fun HistoryScreen(
-    data: List<Triple<String, Int, Long>>,
-    postureAnalysis: PostureAnalysis? = null
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text("Posture History", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 24.dp))
-        
-        // Current posture info if available
-        postureAnalysis?.let { analysis ->
-            PostureInfoCard(
-                pose = analysis.postureName,
-                score = analysis.score,
-                postureAnalysis = analysis
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-        
-        PostureGraph(data.map { it.second to it.third }, modifier = Modifier.fillMaxWidth().height(300.dp))
-    }
-}
-
-@Composable
-fun PostureGraph(data: List<Pair<Int, Long>>, modifier: Modifier = Modifier) {
-    val themeColors = MaterialTheme.colorScheme
-    val lineColor = themeColors.primary
-    val pointColor = themeColors.secondary
-    val textColor = themeColors.onSurface
-    val gradientStartColor = themeColors.primary.copy(alpha = 0.4f)
-    val gradientEndColor = themeColors.primary.copy(alpha = 0.0f)
-    val gridColor = themeColors.onSurface.copy(alpha = 0.2f)
-
-    val dateFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
-
-    Box(modifier = modifier) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val bottomPadding = 90f // for labels
-            val leftPadding = 100f // for Y axis labels
-            val graphWidth = size.width - leftPadding
-            val graphHeight = size.height - bottomPadding
-
-            if (data.size < 2) {
-                // Handle case with not enough data
-                return@Canvas
-            }
-
-            // Draw Y-axis labels and grid lines
-            val yAxisLabels = listOf(0, 50, 80, 100)
-            val textPaint = Paint().apply {
-                color = textColor.toArgb()
-                textSize = 35f
-                textAlign = Paint.Align.RIGHT
-            }
-            yAxisLabels.forEach { label ->
-                val y = graphHeight - (graphHeight * (label / 100f))
-                drawContext.canvas.nativeCanvas.drawText(
-                    label.toString(),
-                    leftPadding - 20,
-                    y + (textPaint.fontMetrics.descent - textPaint.fontMetrics.ascent) / 2,
-                    textPaint
-                )
-                drawLine(
-                    color = gridColor,
-                    start = Offset(leftPadding, y),
-                    end = Offset(size.width, y),
-                    strokeWidth = 2f,
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
-                )
-            }
-
-            val points = data.mapIndexed { index, (value, _) ->
-                PointF(
-                    leftPadding + (graphWidth / (data.size - 1)) * index,
-                    graphHeight - (graphHeight * (value / 100f))
-                )
-            }
-
-            // Smooth line path
-            val linePath = Path().apply {
-                moveTo(points.first().x, points.first().y)
-                for (i in 0 until points.size - 1) {
-                    val p1 = points[i]
-                    val p2 = points[i + 1]
-                    val controlPoint1 = PointF((p1.x + p2.x) / 2f, p1.y)
-                    val controlPoint2 = PointF((p1.x + p2.x) / 2f, p2.y)
-                    cubicTo(
-                        controlPoint1.x, controlPoint1.y,
-                        controlPoint2.x, controlPoint2.y,
-                        p2.x, p2.y
-                    )
-                }
-            }
-
-            // Gradient fill path
-            val fillPath = Path().apply {
-                moveTo(points.first().x, graphHeight)
-                lineTo(points.first().x, points.first().y)
-                for (i in 0 until points.size - 1) {
-                    val p1 = points[i]
-                    val p2 = points[i + 1]
-                    val controlPoint1 = PointF((p1.x + p2.x) / 2f, p1.y)
-                    val controlPoint2 = PointF((p1.x + p2.x) / 2f, p2.y)
-                    cubicTo(
-                        controlPoint1.x, controlPoint1.y,
-                        controlPoint2.x, controlPoint2.y,
-                        p2.x, p2.y
-                    )
-                }
-                lineTo(points.last().x, graphHeight)
-                close()
-            }
-
-            // Draw gradient fill
-            drawPath(
-                path = fillPath,
-                brush = Brush.verticalGradient(
-                    colors = listOf(gradientStartColor, gradientEndColor),
-                    startY = 0f,
-                    endY = graphHeight
-                )
-            )
-
-            // Draw smooth line
-            drawPath(
-                path = linePath,
-                color = lineColor,
-                style = Stroke(width = 8f)
-            )
-
-            // Draw points
-            points.forEach {
-                drawCircle(
-                    color = pointColor,
-                    radius = 12f,
-                    center = Offset(it.x, it.y)
-                )
-                drawCircle(
-                    color = Color.White,
-                    radius = 6f,
-                    center = Offset(it.x, it.y)
-                )
-            }
-
-            // Draw timestamps
-            val timestampTextPaint = Paint().apply {
-                color = textColor.toArgb()
-                textSize = 35f
-                textAlign = Paint.Align.CENTER
-            }
-            data.forEachIndexed { index, (_, timestamp) ->
-                val x = leftPadding + (graphWidth / (data.size - 1)) * index
-                drawContext.canvas.nativeCanvas.drawText(
-                    dateFormat.format(Date(timestamp)),
-                    x,
-                    size.height - timestampTextPaint.fontMetrics.descent, // Position just above the bottom edge
-                    timestampTextPaint
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun PostureInfoCard(
-    pose: String, 
-    score: Int, 
-    postureAnalysis: PostureAnalysis? = null
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                horizontalAlignment = Alignment.Start
-            ) {
-                Text(
-                    text = "CURRENT POSTURE",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = pose,
-                    style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                
-                // Show duration if available
-                if (postureAnalysis != null && postureAnalysis.durationSeconds > 0) {
-                    Text(
-                        text = "Held for %.1f seconds".format(postureAnalysis.durationSeconds),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
-            }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(
-                        progress = { score / 100f },
-                        modifier = Modifier.size(64.dp),
-                        strokeWidth = 6.dp,
-                        trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
-                        color = when {
-                            score > 80 -> Color(0xFF4CAF50) // Green
-                            score > 60 -> Color(0xFFFFC107) // Amber
-                            else -> Color(0xFFF44336)       // Red
-                        }
-                    )
-                    Text(
-                        text = "$score",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
-// --- Utilities: YUV conversion and keypoint rotation ---
-private fun yuv420ToNV21(image: Image): ByteArray {
-    val yPlane = image.planes[0]
-    val uPlane = image.planes[1]
-    val vPlane = image.planes[2]
-    val ySize = yPlane.buffer.remaining()
-    val uSize = uPlane.buffer.remaining()
-    val vSize = vPlane.buffer.remaining()
-
-    val nv21 = ByteArray(image.width * image.height * 3 / 2)
-
-    // Copy Y with row stride consideration
-    var outIndex = 0
-    val yRowStride = yPlane.rowStride
-    val yPixelStride = yPlane.pixelStride
-    val yBuffer = yPlane.buffer
-    val width = image.width
-    val height = image.height
-    // Ensure absolute reads start from 0
-    yBuffer.rewind()
-    for (row in 0 until height) {
-        var col = 0
-        var yPos = row * yRowStride
-        while (col < width) {
-            nv21[outIndex++] = yBuffer.get(yPos)
-            yPos += yPixelStride
-            col++
-        }
-    }
-
-    // Interleave VU (NV21) from U and V planes with stride handling
-    val uRowStride = uPlane.rowStride
-    val vRowStride = vPlane.rowStride
-    val uPixelStride = uPlane.pixelStride
-    val vPixelStride = vPlane.pixelStride
-    val uBuffer = uPlane.buffer
-    val vBuffer = vPlane.buffer
-
-    val chromaHeight = height / 2
-    val chromaWidth = width / 2
-
-    // Position buffers at start
-    uBuffer.rewind()
-    vBuffer.rewind()
-
-    for (row in 0 until chromaHeight) {
-        var uPos = row * uRowStride
-        var vPos = row * vRowStride
-        for (col in 0 until chromaWidth) {
-            // NV21 expects V then U
-            nv21[outIndex++] = vBuffer.get(vPos)
-            nv21[outIndex++] = uBuffer.get(uPos)
-            uPos += uPixelStride
-            vPos += vPixelStride
-        }
-    }
-
-    return nv21
-}
-
-private fun rotateKeypoints(
-    keypoints: Map<Int, Keypoint>,
-    width: Int,
-    height: Int,
-    rotationDegrees: Int
-): Pair<MutableMap<Int, Keypoint>, Pair<Int, Int>> {
-    if (rotationDegrees % 360 == 0) return Pair(keypoints.toMutableMap(), Pair(width, height))
-
-    val out = mutableMapOf<Int, Keypoint>()
-    when ((rotationDegrees % 360 + 360) % 360) {
-        90 -> {
-            // (x, y) -> (y, width - x)
-            keypoints.forEach { (id, kp) ->
-                val nx = kp.y
-                val ny = (width - 1) - kp.x
-                out[id] = Keypoint(nx, ny, kp.score)
-            }
-            return Pair(out, Pair(height, width))
-        }
-        180 -> {
-            // (x, y) -> (width - x, height - y)
-            keypoints.forEach { (id, kp) ->
-                val nx = (width - 1) - kp.x
-                val ny = (height - 1) - kp.y
-                out[id] = Keypoint(nx, ny, kp.score)
-            }
-            return Pair(out, Pair(width, height))
-        }
-        270 -> {
-            // (x, y) -> (height - y, x)
-            keypoints.forEach { (id, kp) ->
-                val nx = (height - 1) - kp.y
-                val ny = kp.x
-                out[id] = Keypoint(nx, ny, kp.score)
-            }
-            return Pair(out, Pair(height, width))
-        }
-        else -> {
-            // Fallback no-rotation
-            return Pair(keypoints.toMutableMap(), Pair(width, height))
-        }
     }
 }
