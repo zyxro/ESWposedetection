@@ -19,3 +19,43 @@ The `create_dataset.py` script is responsible for preprocessing pose data captur
    - Combines extracted features with posture labels to create a structured dataset.
 
 The resulting dataset is saved as a CSV file (`posture_dataset.csv`) for further analysis or machine learning tasks.
+
+# Model Training
+
+The `train_model.py` script is responsible for training a machine learning model to classify different postures based on the processed dataset. The process involves:
+
+1. **Data Splitting:**
+   - The dataset is split into training and testing sets, ensuring the class distribution is preserved using stratification.
+
+2. **Model Selection:**
+   - A Random Forest Classifier is used as the model for training.
+
+3. **Training:**
+   - The model is trained on the training set using the extracted features.
+
+4. **Evaluation:**
+   - The trained model is evaluated on the testing set to measure its accuracy and performance.
+
+# Training and Evaluation
+
+The `train_model.py` script trains a Random Forest Classifier to classify postures based on the processed dataset. Below are the key steps and outputs:
+
+1. **Training the Model:**
+   - The script uses a Random Forest Classifier with 500 decision trees (`n_estimators=500`).
+   - The model is trained on the training dataset to learn patterns and relationships between features and labels.
+
+2. **Classification Report:**
+   - After training, the model is evaluated on the test dataset.
+   - The `classification_report` provides detailed metrics, including:
+     - **Precision:** The proportion of true positive predictions among all positive predictions.
+     - **Recall:** The proportion of true positive predictions among all actual positives.
+     - **F1-Score:** The harmonic mean of precision and recall, balancing both metrics.
+     - **Support:** The number of occurrences of each class in the test dataset.
+
+3. **Model Accuracy:**
+   - The overall accuracy of the model is displayed as a percentage, indicating the proportion of correct predictions.
+
+4. **Saving the Model:**
+   - The trained model is saved as `posture_model_final.pkl` for future use in live posture detection.
+
+These outputs help in understanding the model's performance and readiness for deployment.

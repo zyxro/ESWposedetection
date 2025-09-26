@@ -40,8 +40,8 @@ def train_posture_model(csv_path='posture_dataset_final.csv'):
 
     # 3. Build and Train the Random Forest Model
     print("\n--- Training the Random Forest model ---")
-    # We create a "forest" of 100 decision trees. The model's prediction will be
-    # the majority vote from all 100 trees.
+    # We create a "forest" of 500 decision trees. The model's prediction will be
+    # the majority vote from all 500 trees.
     model = RandomForestClassifier(n_estimators=500, random_state=42)
     
     # This is the core learning step. The model finds patterns in the training data.
