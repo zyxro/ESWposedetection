@@ -4,7 +4,7 @@ import json
 import numpy as np
 import glob
 
-# --- This is the feature extraction logic, updated with your suggestions ---
+# --- This is the feature extraction logic, updated with your specifications ---
 def calculate_angle(a, b, c):
     """Calculates the angle between three points in 2D space."""
     a = np.array(a)
@@ -22,8 +22,8 @@ def calculate_angle(a, b, c):
 
 def extract_features_from_file(filepath):
     """
-    Loads a JSON file, extracts key upper-body keypoints, and calculates 
-    the neck angle and the new torso lean angle.
+    Loads a JSON file, extracts keypoints for the right side of the body, 
+    and calculates the three angles you defined.
     """
     try:
         with open(filepath, 'r') as f:
@@ -38,44 +38,50 @@ def extract_features_from_file(filepath):
 
     keypoints = {part['part_name']: part for part in data['persons'][0]['keypoints']}
     
-    left_ear_conf = keypoints.get('left_ear', {}).get('confidence', 0)
-    right_ear_conf = keypoints.get('right_ear', {}).get('confidence', 0)
-    side = 'left' if left_ear_conf > right_ear_conf else 'right'
+    # --- We are now specifically targeting the RIGHT side keypoints ---
+    ear = keypoints.get('right_ear')
+    shoulder = keypoints.get('right_shoulder')
+    hip = keypoints.get('right_hip')
+    knee = keypoints.get('right_knee')
+    ankle = keypoints.get('right_ankle')
 
-    # We only need Ear, Shoulder, and Hip now
-    ear = keypoints.get(f'{side}_ear')
-    shoulder = keypoints.get(f'{side}_shoulder')
-    hip = keypoints.get(f'{side}_hip')
-
-    if not all([ear, shoulder, hip]):
-        print(f"  - Skipping {os.path.basename(filepath)}: Missing a required keypoint (ear, shoulder, or hip).")
+    # Check if all the necessary keypoints were found in the file
+    if not all([ear, shoulder, hip, knee, ankle]):
+        missing = [k for k, v in {'ear': ear, 'shoulder': shoulder, 'hip': hip, 'knee': knee, 'ankle': ankle}.items() if v is None]
+        print(f"  - Skipping {os.path.basename(filepath)}: Missing keypoint(s): {', '.join(missing)}")
         return None
     
-    # Confidence check for our required upper body points
-    min_confidence = 0.3 
-    required_parts = {'ear': ear, 'shoulder': shoulder, 'hip': hip}
-    
-    for part_name, part_data in required_parts.items():
-        if part_data['confidence'] < min_confidence:
-            print(f"  - Skipping {os.path.basename(filepath)}: Low confidence for '{side}_{part_name}' ({part_data['confidence']:.2f} < {min_confidence}).")
-            return None
+    # # --- Confidence check commented out as requested ---
+    # # You can re-enable this later by removing the '#' from the lines below
+    # # if you want to filter for higher quality data.
+    # min_confidence = 0.3 
+    # required_parts = {'ear': ear, 'shoulder': shoulder, 'hip': hip, 'knee': knee, 'ankle': ankle}
+    # for part_name, part_data in required_parts.items():
+    #     if part_data['confidence'] < min_confidence:
+    #         print(f"  - Skipping {os.path.basename(filepath)}: Low confidence for 'right_{part_name}' ({part_data['confidence']:.2f} < {min_confidence}).")
+    #         return None
 
+    # Get the coordinates for each point
     ear_coords = [ear['x'], ear['y']]
     shoulder_coords = [shoulder['x'], shoulder['y']]
     hip_coords = [hip['x'], hip['y']]
+    knee_coords = [knee['x'], knee['y']]
+    ankle_coords = [ankle['x'], ankle['y']]
 
-    # --- CALCULATE NEW ANGLES ---
-    # 1. Neck Angle (Ear-Shoulder-Hip) remains the same and is a great feature.
-    neck_angle = calculate_angle(ear_coords, shoulder_coords, hip_coords)
+    # --- CALCULATE THE THREE ANGLES YOU DEFINED ---
+    # 1. Angle at the back of the knees (Ankle-Knee-Hip)
+    knee_angle = calculate_angle(ankle_coords, knee_coords, hip_coords)
 
-    # 2. Torso Lean Angle (Your suggestion)
-    # Create a horizontal reference point from the hip
-    horizontal_ref_point = [hip['x'] + 100, hip['y']] # 100 pixels to the right on the same horizontal line
-    torso_lean_angle = calculate_angle(shoulder_coords, hip_coords, horizontal_ref_point)
+    # 2. Angle at the front of the torso/hip (Knee-Hip-Shoulder)
+    torso_hip_angle = calculate_angle(knee_coords, hip_coords, shoulder_coords)
+    
+    # 3. Angle at the neck/torso junction (Hip-Shoulder-Ear)
+    neck_torso_angle = calculate_angle(hip_coords, shoulder_coords, ear_coords)
 
     features = {
-        "neck_angle": neck_angle,
-        "torso_lean_angle": torso_lean_angle # New feature name
+        "knee_angle": knee_angle,
+        "torso_hip_angle": torso_hip_angle,
+        "neck_torso_angle": neck_torso_angle
     }
     return features
 # --------------------------------------------------------------------
@@ -127,7 +133,7 @@ if __name__ == "__main__":
         posture_dataset = build_dataset(json_base_directory)
 
         if posture_dataset is not None and not posture_dataset.empty:
-            output_csv_path = 'posture_dataset.csv'
+            output_csv_path = 'posture_dataset_final.csv'
             posture_dataset.to_csv(output_csv_path, index=False)
             
             print(f"\n\nSuccessfully created dataset with {len(posture_dataset)} samples.")
