@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Paint
 import android.graphics.PointF
+import android.media.Image
 import android.os.Bundle
 import android.util.Size
 import androidx.annotation.Keep
@@ -398,49 +399,18 @@ fun CameraScreen(
             controller = controller,
             modifier = Modifier.fillMaxSize()
         )
-        PoseOverlayComposable(overlay)
-        
+        if (overlay != null && showSkeleton) {
+            PoseOverlayComposable(overlay)
+        }
         // Performance overlay (top-right)
         if (QidkBackends.isAvailable() && performanceMetrics != null) {
-            Card(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.Black.copy(alpha = 0.7f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(8.dp)) {
-                    Text("FPS: %.1f".format(performanceMetrics.fps), 
-                         color = Color.White, style = MaterialTheme.typography.bodySmall)
-                    Text("%.1fms".format(performanceMetrics.totalTimeMs), 
-                         color = Color.White, style = MaterialTheme.typography.bodySmall)
+            Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                Column(modifier = Modifier.align(Alignment.TopEnd)) {
+                    AssistChip(onClick = {}, label = { Text(text = "%.1f FPS".format(performanceMetrics.fps)) })
+                    Spacer(Modifier.height(8.dp))
+                    AssistChip(onClick = {}, label = { Text(text = "%.1f ms".format(performanceMetrics.totalTimeMs)) })
                 }
             }
-        }
-        
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-                .align(Alignment.TopEnd),
-            horizontalArrangement = Arrangement.End
-        ) {
-            AssistChip(
-                onClick = onToggleSkeleton,
-                label = { Text(if (showSkeleton) "Hide Skeleton" else "Show Skeleton") }
-            )
-        }
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-        ) {
-            PostureInfoCard(
-                pose = pose, 
-                score = score, 
-                postureAnalysis = postureAnalysis
-            )
         }
     }
 }
@@ -470,7 +440,7 @@ fun PoseOverlayComposable(pose: PoseOverlay?) {
 
         fun mapX(x: Float): Float {
             val v = x * scale
-            return if (pose.isFrontCamera) (size.width - dx) - v else dx + v
+            return if (pose.isFrontCamera) dx + (contentW - v) else dx + v
         }
         fun mapY(y: Float): Float = dy + y * scale
 
@@ -544,20 +514,9 @@ class FrameAnalyzer : ImageAnalysis.Analyzer {
 
         // Attempt QNN path first if available
         if (QidkBackends.isAvailable()) {
-            // Convert YUV420 planes into a single NV21 byte array (simple copy)
             try {
-                val yPlane = mediaImage.planes[0].buffer
-                val uPlane = mediaImage.planes[1].buffer
-                val vPlane = mediaImage.planes[2].buffer
-                val ySize = yPlane.remaining()
-                val uSize = uPlane.remaining()
-                val vSize = vPlane.remaining()
-                val nv21 = ByteArray(ySize + uSize + vSize)
-                yPlane.get(nv21, 0, ySize)
-                // NOTE: This layout might differ on some devices; proper conversion may be needed.
-                vPlane.get(nv21, ySize, vSize)
-                uPlane.get(nv21, ySize + vSize, uSize)
-                val pose = QidkBackends.detectAndPose(nv21, width, height, isFront = false)
+                val nv21 = yuv420ToNV21(mediaImage)
+                val pose = QidkBackends.detectAndPose(nv21, width, height, rotation, isFront = false)
                 if (pose != null) {
                     _state.value = pose
                     image.close()
@@ -613,7 +572,7 @@ object QidkBackends {
     }
 
     // Accept YUV420 (NV21) bytes and produce PoseOverlay or null
-    fun detectAndPose(yuv: ByteArray, width: Int, height: Int, isFront: Boolean): PoseOverlay? {
+    fun detectAndPose(yuv: ByteArray, width: Int, height: Int, rotationDegrees: Int, isFront: Boolean): PoseOverlay? {
         val n = native ?: return null
         val maxKp = 40 // Enough for HRNet variants
         val ids = IntArray(maxKp)
@@ -644,16 +603,24 @@ object QidkBackends {
             16 to PoseLandmark.RIGHT_ANKLE    // RIGHT_ANKLE = 16
         )
         
-        val map = mutableMapOf<Int, Keypoint>()
+        // Populate keypoints map
+        var map = mutableMapOf<Int, Keypoint>()
         for (i in 0 until count) {
             val mlkitId = hrnetToMLKit[ids[i]]
             if (mlkitId != null) {
                 map[mlkitId] = Keypoint(xs[i], ys[i], scores[i])
             }
         }
-        return PoseOverlay(map, width, height, isFrontCamera = isFront)
+
+        // Rotate keypoints into upright preview space
+        val rotated = rotateKeypoints(map, width, height, rotationDegrees)
+        val rotatedMap = rotated.first
+        val outW = rotated.second.first
+        val outH = rotated.second.second
+
+        return PoseOverlay(rotatedMap, outW, outH, isFrontCamera = isFront)
     }
-    
+
     // Get performance analytics
     fun getPerformanceMetrics(): PerformanceMetrics? {
         val n = native ?: return null
@@ -962,6 +929,108 @@ fun PostureInfoCard(
                     )
                 }
             }
+        }
+    }
+}
+
+// --- Utilities: YUV conversion and keypoint rotation ---
+private fun yuv420ToNV21(image: Image): ByteArray {
+    val yPlane = image.planes[0]
+    val uPlane = image.planes[1]
+    val vPlane = image.planes[2]
+    val ySize = yPlane.buffer.remaining()
+    val uSize = uPlane.buffer.remaining()
+    val vSize = vPlane.buffer.remaining()
+
+    val nv21 = ByteArray(image.width * image.height * 3 / 2)
+
+    // Copy Y with row stride consideration
+    var outIndex = 0
+    val yRowStride = yPlane.rowStride
+    val yPixelStride = yPlane.pixelStride
+    val yBuffer = yPlane.buffer
+    val width = image.width
+    val height = image.height
+    for (row in 0 until height) {
+        var col = 0
+        var yPos = row * yRowStride
+        while (col < width) {
+            nv21[outIndex++] = yBuffer.get(yPos)
+            yPos += yPixelStride
+            col++
+        }
+    }
+
+    // Interleave VU (NV21) from U and V planes with stride handling
+    val uRowStride = uPlane.rowStride
+    val vRowStride = vPlane.rowStride
+    val uPixelStride = uPlane.pixelStride
+    val vPixelStride = vPlane.pixelStride
+    val uBuffer = uPlane.buffer
+    val vBuffer = vPlane.buffer
+
+    val chromaHeight = height / 2
+    val chromaWidth = width / 2
+
+    // Position buffers at start
+    uBuffer.rewind()
+    vBuffer.rewind()
+
+    for (row in 0 until chromaHeight) {
+        var uPos = row * uRowStride
+        var vPos = row * vRowStride
+        for (col in 0 until chromaWidth) {
+            // NV21 expects V then U
+            nv21[outIndex++] = vBuffer.get(vPos)
+            nv21[outIndex++] = uBuffer.get(uPos)
+            uPos += uPixelStride
+            vPos += vPixelStride
+        }
+    }
+
+    return nv21
+}
+
+private fun rotateKeypoints(
+    keypoints: Map<Int, Keypoint>,
+    width: Int,
+    height: Int,
+    rotationDegrees: Int
+): Pair<MutableMap<Int, Keypoint>, Pair<Int, Int>> {
+    if (rotationDegrees % 360 == 0) return Pair(keypoints.toMutableMap(), Pair(width, height))
+
+    val out = mutableMapOf<Int, Keypoint>()
+    when ((rotationDegrees % 360 + 360) % 360) {
+        90 -> {
+            // (x, y) -> (y, width - x)
+            keypoints.forEach { (id, kp) ->
+                val nx = kp.y
+                val ny = (width - 1) - kp.x
+                out[id] = Keypoint(nx, ny, kp.score)
+            }
+            return Pair(out, Pair(height, width))
+        }
+        180 -> {
+            // (x, y) -> (width - x, height - y)
+            keypoints.forEach { (id, kp) ->
+                val nx = (width - 1) - kp.x
+                val ny = (height - 1) - kp.y
+                out[id] = Keypoint(nx, ny, kp.score)
+            }
+            return Pair(out, Pair(width, height))
+        }
+        270 -> {
+            // (x, y) -> (height - y, x)
+            keypoints.forEach { (id, kp) ->
+                val nx = (height - 1) - kp.y
+                val ny = kp.x
+                out[id] = Keypoint(nx, ny, kp.score)
+            }
+            return Pair(out, Pair(height, width))
+        }
+        else -> {
+            // Fallback no-rotation
+            return Pair(keypoints.toMutableMap(), Pair(width, height))
         }
     }
 }
