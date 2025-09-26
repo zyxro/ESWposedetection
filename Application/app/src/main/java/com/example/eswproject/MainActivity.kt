@@ -552,6 +552,10 @@ object QidkBackends {
     private var checked = false
     private var available = false
 
+    // State for temporal smoothing
+    private var lastMap: MutableMap<Int, Keypoint>? = null
+    private var lastDims: Pair<Int, Int>? = null
+
     fun ensureInit() {
         if (checked) return
         checked = true
@@ -580,45 +584,82 @@ object QidkBackends {
         val ys = FloatArray(maxKp)
         val scores = FloatArray(maxKp)
         val count = try { n.runPipeline(yuv, width, height, 0.25f, ids, xs, ys, scores, maxKp) } catch (_: Throwable) { 0 }
-        if (count <= 0) return null
+        if (count <= 0) {
+            // reset smoothing when no detections
+            lastMap = null
+            lastDims = null
+            return null
+        }
         
         // Map HRNet COCO-17 keypoint IDs to ML Kit PoseLandmark constants
         val hrnetToMLKit = mapOf(
-            0 to PoseLandmark.NOSE,           // NOSE = 0
-            1 to PoseLandmark.LEFT_EYE,       // LEFT_EYE = 1  
-            2 to PoseLandmark.RIGHT_EYE,      // RIGHT_EYE = 2
-            3 to PoseLandmark.LEFT_EAR,       // LEFT_EAR = 3
-            4 to PoseLandmark.RIGHT_EAR,      // RIGHT_EAR = 4
-            5 to PoseLandmark.LEFT_SHOULDER,  // LEFT_SHOULDER = 5
-            6 to PoseLandmark.RIGHT_SHOULDER, // RIGHT_SHOULDER = 6
-            7 to PoseLandmark.LEFT_ELBOW,     // LEFT_ELBOW = 7
-            8 to PoseLandmark.RIGHT_ELBOW,    // RIGHT_ELBOW = 8
-            9 to PoseLandmark.LEFT_WRIST,     // LEFT_WRIST = 9
-            10 to PoseLandmark.RIGHT_WRIST,   // RIGHT_WRIST = 10
-            11 to PoseLandmark.LEFT_HIP,      // LEFT_HIP = 11
-            12 to PoseLandmark.RIGHT_HIP,     // RIGHT_HIP = 12
-            13 to PoseLandmark.LEFT_KNEE,     // LEFT_KNEE = 13
-            14 to PoseLandmark.RIGHT_KNEE,    // RIGHT_KNEE = 14
-            15 to PoseLandmark.LEFT_ANKLE,    // LEFT_ANKLE = 15
-            16 to PoseLandmark.RIGHT_ANKLE    // RIGHT_ANKLE = 16
+            0 to PoseLandmark.NOSE,
+            1 to PoseLandmark.LEFT_EYE,
+            2 to PoseLandmark.RIGHT_EYE,
+            3 to PoseLandmark.LEFT_EAR,
+            4 to PoseLandmark.RIGHT_EAR,
+            5 to PoseLandmark.LEFT_SHOULDER,
+            6 to PoseLandmark.RIGHT_SHOULDER,
+            7 to PoseLandmark.LEFT_ELBOW,
+            8 to PoseLandmark.RIGHT_ELBOW,
+            9 to PoseLandmark.LEFT_WRIST,
+            10 to PoseLandmark.RIGHT_WRIST,
+            11 to PoseLandmark.LEFT_HIP,
+            12 to PoseLandmark.RIGHT_HIP,
+            13 to PoseLandmark.LEFT_KNEE,
+            14 to PoseLandmark.RIGHT_KNEE,
+            15 to PoseLandmark.LEFT_ANKLE,
+            16 to PoseLandmark.RIGHT_ANKLE
         )
         
-        // Populate keypoints map
-        var map = mutableMapOf<Int, Keypoint>()
+        // Populate keypoints map (raw)
+        val rawMap = mutableMapOf<Int, Keypoint>()
         for (i in 0 until count) {
             val mlkitId = hrnetToMLKit[ids[i]]
             if (mlkitId != null) {
-                map[mlkitId] = Keypoint(xs[i], ys[i], scores[i])
+                rawMap[mlkitId] = Keypoint(xs[i], ys[i], scores[i])
             }
         }
 
         // Rotate keypoints into upright preview space
-        val rotated = rotateKeypoints(map, width, height, rotationDegrees)
+        val rotated = rotateKeypoints(rawMap, width, height, rotationDegrees)
         val rotatedMap = rotated.first
         val outW = rotated.second.first
         val outH = rotated.second.second
 
-        return PoseOverlay(rotatedMap, outW, outH, isFrontCamera = isFront)
+        // Confidence gating: require at least 5 reliable joints
+        val reliable = rotatedMap.values.count { it.score >= 0.5f }
+        if (reliable < 5) {
+            lastMap = null
+            lastDims = null
+            return null
+        }
+
+        // Temporal smoothing (EMA)
+        val alpha = 0.7f // previous weight
+        val smoothed = mutableMapOf<Int, Keypoint>()
+        if (lastMap != null && lastDims == Pair(outW, outH)) {
+            val prev = lastMap!!
+            for ((id, curr) in rotatedMap) {
+                val p = prev[id]
+                if (p != null) {
+                    val sx = alpha * p.x + (1 - alpha) * curr.x
+                    val sy = alpha * p.y + (1 - alpha) * curr.y
+                    val ss = alpha * p.score + (1 - alpha) * curr.score
+                    smoothed[id] = Keypoint(sx, sy, ss)
+                } else {
+                    smoothed[id] = curr
+                }
+            }
+        } else {
+            smoothed.putAll(rotatedMap)
+        }
+
+        // Update state
+        lastMap = smoothed.toMutableMap()
+        lastDims = Pair(outW, outH)
+
+        return PoseOverlay(smoothed, outW, outH, isFrontCamera = isFront)
     }
 
     // Get performance analytics
@@ -951,6 +992,8 @@ private fun yuv420ToNV21(image: Image): ByteArray {
     val yBuffer = yPlane.buffer
     val width = image.width
     val height = image.height
+    // Ensure absolute reads start from 0
+    yBuffer.rewind()
     for (row in 0 until height) {
         var col = 0
         var yPos = row * yRowStride
